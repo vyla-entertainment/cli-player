@@ -19,7 +19,7 @@ load_dotenv()
 
 TMDB_KEY = os.getenv("TMDB_KEY")
 BASE_URL = os.getenv("BASE_URL")
-CHARS = os.getenv("CHARS")
+ASCII_CHARSET = " `.-':_,^=;><+!rc*/z?sLTv)J7(|Fi{C}fI31tlu[neoZ5Yxjya]2ESwqkP6h9d4VpOGbUAKXHm8RD#$Bg0MNWQ%&@"
 
 if not TMDB_KEY:
     raise RuntimeError("Missing TMDB_KEY in .env")
@@ -133,31 +133,29 @@ def fetch_stream(api_url, ffmpeg):
     return None
 
 def to_ascii(frame, w, h, color):
-    frame = cv2.resize(frame, (w, h), interpolation=cv2.INTER_LINEAR)
+    frame = cv2.resize(frame, (w, h), interpolation=cv2.INTER_AREA)
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    sharp = cv2.addWeighted(gray, 1.5, cv2.GaussianBlur(gray, (0, 0), 1.2), -0.5, 0)
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-    eq = clahe.apply(sharp)
-    chars = np.array(list(CHARS))
-    idx = (eq.astype(np.float32) / 255 * (len(chars) - 1)).astype(np.int32)
-    char_grid = chars[idx]
-    
+    clahe = cv2.createCLAHE(clipLimit=4.0, tileGridSize=(4, 4))
+    gray = clahe.apply(gray)
+    blurred = cv2.GaussianBlur(gray, (0, 0), 0.4)
+    gray = np.clip(cv2.addWeighted(gray, 2.5, blurred, -1.5, 0), 0, 255).astype(np.uint8)
+    charset_len = len(ASCII_CHARSET) - 1
+    idx = (gray.astype(np.float32) / 255 * charset_len).astype(np.int32)
     if not color:
-        return "\n".join("".join(row) for row in char_grid)
-        
+        return "\n".join("".join(ASCII_CHARSET[idx[y, x]] for x in range(w)) for y in range(h))
     r = frame[:, :, 2]
     g = frame[:, :, 1]
-    b = frame[:, :, 0]
+    b_ch = frame[:, :, 0]
     lines = []
     for y in range(h):
-        line = []
+        row = []
         for x in range(w):
-            c = char_grid[y, x]
+            c = ASCII_CHARSET[idx[y, x]]
             if c == ' ':
-                line.append(' ')
+                row.append(' ')
             else:
-                line.append(f"\033[38;2;{r[y,x]};{g[y,x]};{b[y,x]}m{c}")
-        lines.append("".join(line))
+                row.append(f"\033[38;2;{r[y,x]};{g[y,x]};{b_ch[y,x]}m{c}")
+        lines.append("".join(row))
     return "\n".join(lines) + "\033[0m"
 
 def play(stream_url, headers_dict, ffmpeg, ffplay):
@@ -165,8 +163,8 @@ def play(stream_url, headers_dict, ffmpeg, ffplay):
     if headers_dict:
         h_str = "".join(f"{k}: {v}\r\n" for k, v in headers_dict.items())
         header_args = ["-headers", h_str]
-        
-    buf = queue.Queue(maxsize=72)
+
+    buf = queue.Queue(maxsize=4)
     paused = threading.Event()
     seek_delta = [0]
     volume = [100]
@@ -174,6 +172,14 @@ def play(stream_url, headers_dict, ffmpeg, ffplay):
     current_time = [0.0]
     audio_proc = [None]
     color_mode = [True]
+    term_size = [terminal_size()]
+
+    def size_watcher():
+        while not quit_flag[0]:
+            term_size[0] = terminal_size()
+            time.sleep(0.5)
+
+    threading.Thread(target=size_watcher, daemon=True).start()
 
     def start_audio(pos, vol):
         if audio_proc[0]:
@@ -186,7 +192,7 @@ def play(stream_url, headers_dict, ffmpeg, ffplay):
 
     def decode():
         offset = [0.0]
-        fsize = 640 * 360 * 3
+        fsize = 1920 * 1080 * 3
         while not quit_flag[0]:
             start_offset = offset[0]
             start_audio(start_offset, volume[0])
@@ -197,7 +203,7 @@ def play(stream_url, headers_dict, ffmpeg, ffplay):
                 cmd += header_args
             cmd += [
                 "-i", stream_url,
-                "-vf", "fps=24,scale=640:360",
+                "-vf", "fps=24,scale=1920:1080",
                 "-f", "rawvideo", "-pix_fmt", "bgr24",
                 "-an", "-"
             ]
@@ -217,7 +223,7 @@ def play(stream_url, headers_dict, ffmpeg, ffplay):
                     if len(raw) != fsize:
                         buf.put(None)
                         return
-                    frame = np.frombuffer(raw, np.uint8).reshape((360, 640, 3))
+                    frame = np.frombuffer(raw, np.uint8).reshape((1080, 1920, 3))
                     cur = start_offset + frames_decoded[0] / 24
                     current_time[0] = cur
                     try:
@@ -274,33 +280,41 @@ def play(stream_url, headers_dict, ffmpeg, ffplay):
     sys.stdout.flush()
 
     t0 = time.perf_counter()
+    last_tw, last_th = 0, 0
+    frame_str = ""
 
     try:
         while True:
             item = buf.get(timeout=12)
-            if item is None: break
+            if item is None:
+                break
             frame, elapsed = item
 
             if paused.is_set():
                 t0 = time.perf_counter() - elapsed
-                time.sleep(0.05)
-                buf.put((frame, elapsed))
+                time.sleep(0.04)
+                try: buf.put((frame, elapsed), block=False)
+                except: pass
                 continue
 
             target_time = t0 + elapsed
             wait = target_time - time.perf_counter()
-
             if wait > 0:
                 time.sleep(wait)
-            elif wait < -0.1:
+            elif wait < -0.15:
                 t0 = time.perf_counter() - elapsed
 
-            tw, th = terminal_size()
+            tw, th = term_size[0]
             vw = tw
             vh = max(1, th - 1)
-            frame_str = to_ascii(frame, vw, vh, color_mode[0])
 
-            sys.stdout.write("\033[H" + frame_str)
+            if tw != last_tw or th != last_th:
+                last_tw, last_th = tw, th
+                sys.stdout.write("\033[2J\033[H")
+                sys.stdout.flush()
+
+            frame_str = to_ascii(frame, vw, vh, color_mode[0])
+            sys.stdout.write("\033[H" + frame_str + "\033[J")
             sys.stdout.flush()
 
     except:
