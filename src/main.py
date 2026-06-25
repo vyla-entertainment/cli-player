@@ -79,19 +79,25 @@ def fetch_stream(tid, mtype, s, e, ffmpeg):
     stop = threading.Event()
     msg_box = ["authenticating..."]
     threading.Thread(target=spin, args=(stop, msg_box), daemon=True).start()
-    
+
     headers = {"User-Agent": "Mozilla/5.0"}
     if VYLA_API_KEY:
         headers["X-API-Key"] = VYLA_API_KEY
     else:
         try:
-            r = requests.post(f"{BASE_URL}/api/auth", timeout=5).json()
-            if "token" in r: headers["X-Session-Token"] = r["token"]
-        except: pass
+            r = requests.post(
+                f"{BASE_URL}/api/auth",
+                headers={"Authorization": f"Bearer {VYLA_API_KEY}"},
+                timeout=5
+            ).json()
+            if "token" in r:
+                headers["X-Session-Token"] = r["token"]
+        except:
+            pass
 
     try:
         msg_box[0] = "fetching sources..."
-        meta = requests.get(f"{BASE_URL}/api?sources_meta=1", timeout=10).json()
+        meta = requests.get(f"{BASE_URL}/api?sources_meta=1", headers=headers, timeout=10).json()
         keys = [src["key"] for src in meta.get("sources", [])]
         random.shuffle(keys)
     except:
@@ -104,7 +110,7 @@ def fetch_stream(tid, mtype, s, e, ffmpeg):
         if mtype == "tv":
             params["season"] = s
             params["episode"] = e
-        
+
         try:
             test_url = f"{BASE_URL}/api/test/{tid}"
             res = requests.get(test_url, params=params, headers=headers, timeout=30).json()
@@ -112,8 +118,9 @@ def fetch_stream(tid, mtype, s, e, ffmpeg):
                 if check_stream(res["url"], ffmpeg):
                     stop.set()
                     return {"url": res["url"], "provider": k}
-        except: pass
-    
+        except:
+            pass
+
     stop.set()
     return None
 
